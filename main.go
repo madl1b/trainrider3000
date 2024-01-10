@@ -245,6 +245,13 @@ func getTrips(validService map[string]bool) map[string]bool {
 	return tripReady
 }
 
+func terminate() {
+	err := os.RemoveAll("trainData")
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
 // func getStopTimes() {
 // 	file, err := os.Open("trainData/stop_times.txt")
 // 	if err != nil {
@@ -327,6 +334,11 @@ func main() {
 		return
 	}
 
+	err = os.MkdirAll("data", 0755)
+	if err != nil {
+		log.Fatal(err)
+	}
+	
 	getStops()
 	serviceCalendar := getCalendar()
 	if serviceCalendar == nil {
@@ -379,5 +391,7 @@ func main() {
 	// if err := scanner.Err(); err != nil {
 	// 	fmt.Println(err)
 	// }
+		terminate()
+
 
 }

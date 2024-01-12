@@ -59,7 +59,7 @@ func getStops() {
 
 	// reduce repetition
 	for i, line := range lines[1:] {
-		if i == insert_limit {
+		if len(stops) == insert_limit || (len(stops) > 0 && i == len(lines)) {
 			qry := strings.Join(stops, ",")
 			full_qry := "INSERT INTO stop (id, code, name, parent_id) VALUES " + qry
 			_, err := db.Exec(full_qry)
@@ -79,12 +79,6 @@ func getStops() {
 		}
 
 		stops = append(stops, fmt.Sprintf("('%s','%s','%s',%s)", id, code, name, parent))
-	}
-
-	if len(stops) > 0 {
-		qry := strings.Join(stops, ",")
-		full_qry := "INSERT INTO stop (id, code, name, parent_id) VALUES " + qry
-		db.Exec(full_qry)
 	}
 
 }
@@ -132,7 +126,7 @@ func getCalendar() map[string]bool {
 	insertionQry := "INSERT INTO calendar (id, mon, tue, wed, thu, fri, sat, sun, start_date, end_date) VALUES "
 	// reduce repetition
 	for i, line := range lines[1:] {
-		if i == insert_limit {
+		if len(services) == insert_limit || (len(services) > 0 && i == len(services)) {
 			qry := strings.Join(services, ",")
 			// get mon-sunday
 			full_qry := insertionQry + qry
@@ -152,19 +146,8 @@ func getCalendar() map[string]bool {
 		dayData := line[1:8]
 		// consider including services for the next day as well
 		if dayData[today] == "1" && curr == start {
-			fmt.Println("cheesecake shops man")
-			services = append(services, "(" + strings.Join(line, ",") + ")")
+			services = append(services, "("+strings.Join(line, ",")+")")
 			serviceMap[id] = true
-		}
-	}
-
-	if len(services) > 0 {
-		qry := strings.Join(services, ",")
-		full_qry := insertionQry + qry
-		fmt.Println(full_qry)
-		_, err := db.Exec(full_qry)
-		if err != nil {
-			log.Fatal(err)
 		}
 	}
 
@@ -212,7 +195,7 @@ func getTrips(validService map[string]bool) map[string]bool {
 	tripReady := make(map[string]bool)
 	// reduce repetition
 	for i, line := range lines[1:] {
-		if i == insert_limit && len(trips) > 0 {
+		if len(trips) == insert_limit || (len(trips) > 0 && i == len(lines)) {
 			qry := strings.Join(trips, ",")
 			full_qry := "INSERT INTO trip (route_id, service_id, id, headsign, short_name, direction_id, block_id, shape_id, wheelchair) VALUES " + qry
 			_, err := db.Exec(full_qry)
@@ -222,23 +205,12 @@ func getTrips(validService map[string]bool) map[string]bool {
 			trips = []string{}
 		}
 		if validService[line[1]] == true {
+			tripReady[line[2]] = true
 			var quotes []int = []int{0, 1, 2, 3, 4, 6, 7}
 			for _, i := range quotes {
 				line[i] = "'" + line[i] + "'"
 			}
-			fmt.Println("shit")
-			trips = append(trips, "("+ strings.Join(line, ",") +")")
-			tripReady[line[0]] = true
-		}
-	}
-
-	if len(trips) > 0 {
-		qry := strings.Join(trips, ",")
-		fmt.Println("2")
-		full_qry := "INSERT INTO trip (route_id, service_id, id, headsign, short_name, direction_id, block_id, shape_id, wheelchair) VALUES " + qry
-		_, err := db.Exec(full_qry)
-		if err != nil {
-			log.Fatal(err)
+			trips = append(trips, "("+strings.Join(line, ",")+")")
 		}
 	}
 
@@ -252,47 +224,88 @@ func terminate() {
 	}
 }
 
-// func getStopTimes() {
-// 	file, err := os.Open("trainData/stop_times.txt")
-// 	if err != nil {
-// 		return
-// 	}
-// 	db, err := sql.Open("sqlite3", "data/data.db")
-// 	if err != nil {
-// 		log.Fatal(err)
-// 	}
+func getStopTimes(trips map[string]bool) {
+	var keys []string
+	for key := range trips {
+		keys = append(keys, key)
+	}
+	print(keys)
 
-// 	db_qry := `
-// 	CREATE TABLE IF NOT EXISTS stop_time (
-// 		trip_id TEXT NOT NULL,
-// 		stop_id TEXT NOT NULL,
-// 		arrival_time TEXT NOT NULL,
-// 		departure_time TEXT NOT NULL,
-// 		stop_sequence INT NOT NULL,
-// 		FOREIGN KEY (trip_id) REFERENCES trip(id)
-// 		FOREIGN KEY (stop_id) REFERENCES stop(id)
-// 	);
-// `
-// 	createDb(db, db_qry)
+	file, err := os.Open("trainData/stop_times.txt")
+	if err != nil {
+		return
+	}
+	db, err := sql.Open("sqlite3", "data/data.db")
+	if err != nil {
+		log.Fatal(err)
+	}
 
-// 	// WE DON'T WANT ALL THE DATA, JUST THE ONES AFTER CURERNT
-// 	// DIFF SERVICE IDS WILL SHOW WHEN CERTAIN TRIPS ARE AVAILABLE
+	db_qry := `
+	CREATE TABLE IF NOT EXISTS stop_time (
+		trip_id TEXT NOT NULL,
+		arrival_time TEXT NOT NULL,
+		departure_time TEXT NOT NULL,
+		id TEXT NOT NULL,
+		sequence INT NOT NULL,
+		headsign TEXT
+	);
+`
 
-// 	// IDEA 1:
-// 	// LOOK AT SERVICE IDS OVER THE NEXT 24-48 HOURS, BASED ON THAT:
-// 	// // NARROW DOWN TRIPS THAT RUN IN CURRENT DAY + TOMORROW
-// 	// // THEN CONSIDER CURRENT TIME AND BEYOND (NOT INTERESTED IN PAST)
-// 	// // HOPEFULLY THIS REDUCES THE SIZE OF THE SQL TABLE BY A LOT
+	createDb(db, db_qry)
 
-// 	// HOW TO REDUCE REPETITION OF SQL DB CREATION??
+	reader := csv.NewReader(file)
+	lines, err := reader.ReadAll()
+	if err != nil {
+		return
+	}
 
-// 	// NEED TO ADD calendar.txt before trips.txt, trips.txt before stop_times.txt
+	insert_limit := 1000
 
-// 	// THIS SHOULD GIVE ME THE NECESSARY DATA TO BUILD THE EDGES TO COMMENCE ROUTING
+	var stop_times []string
+	for i, line := range lines[1:] {
+		if len(stop_times) == insert_limit || (len(stop_times) > 0 && i == len(lines)) {
+			qry := strings.Join(stop_times, ",")
+			// print(qry)
+			full_qry := "INSERT INTO stop_time (trip_id, arrival_time, departure_time, id, sequence, headsign) VALUES " + qry
+			_, err := db.Exec(full_qry)
+			if err != nil {
+				log.Fatal(err)
+			}
+			stop_times = []string{}
+		}
 
-// }
+		if trips[line[0]] == true {
+			var text []int = []int{0, 1, 2, 3, 5}
+			for _, i := range text {
+				line[i] = "'" + line[i] + "'"
+			}
+
+			stop_times = append(stop_times, "("+strings.Join(line[:len(line)-3], ",")+")")
+		}
+	}
+
+	// WE DON'T WANT ALL THE DATA, JUST THE ONES AFTER CURERNT
+	// DIFF SERVICE IDS WILL SHOW WHEN CERTAIN TRIPS ARE AVAILABLE
+
+	// IDEA 1:
+	// LOOK AT SERVICE IDS OVER THE NEXT 24-48 HOURS, BASED ON THAT:
+	// // NARROW DOWN TRIPS THAT RUN IN CURRENT DAY + TOMORROW
+	// // THEN CONSIDER CURRENT TIME AND BEYOND (NOT INTERESTED IN PAST)
+	// // HOPEFULLY THIS REDUCES THE SIZE OF THE SQL TABLE BY A LOT
+
+	// HOW TO REDUCE REPETITION OF SQL DB CREATION??
+
+	// NEED TO ADD calendar.txt before trips.txt, trips.txt before stop_times.txt
+
+	// THIS SHOULD GIVE ME THE NECESSARY DATA TO BUILD THE EDGES TO COMMENCE ROUTING
+
+}
 
 func main() {
+	// err := os.RemoveAll("data")
+	// if err != nil {
+	// 	log.Fatal("shit")
+	// }
 	token := APIKey
 	url := "https://api.transport.nsw.gov.au/v1/gtfs/schedule/sydneytrains"
 	req, err := http.NewRequest("GET", url, nil)
@@ -338,7 +351,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	
+
 	getStops()
 	serviceCalendar := getCalendar()
 	if serviceCalendar == nil {
@@ -347,51 +360,15 @@ func main() {
 	}
 	var keys []string
 	for key := range serviceCalendar {
-			keys = append(keys, key)
+		keys = append(keys, key)
 	}
 
-	fmt.Println(keys)
 	tripSubset := getTrips(serviceCalendar)
 	if tripSubset == nil {
 		log.Fatal("something fucked with getTrips ngl mate")
 	}
-	// getStopTimes()
+	getStopTimes(tripSubset)
 
-	// processing resp data
-	// file, err := os.Open("stopMappings.csv.csv")
-	// if err != nil {
-	// 	fmt.Println(err)
-	// 	return
-	// }
-	// defer file.Close()
-
-	// outfile, err := os.Create("mappings.out")
-	// if err != nil {
-	// 	fmt.Println(err)
-	// 	return
-	// }
-	// defer outfile.Close()
-
-	// scanner := bufio.NewScanner(file)
-
-	// stationIdMap := make(map[string]string)
-
-	// for scanner.Scan() {
-	// 	line := scanner.Text()
-	// 	fields := strings.Split(line, ",")
-
-	// 	if strings.HasSuffix(fields[2], "Light Rail") {
-	// 		break
-	// 	}
-
-	// 	stationIdMap[fields[4]] = fields[2]
-
-	// }
-
-	// if err := scanner.Err(); err != nil {
-	// 	fmt.Println(err)
-	// }
-		terminate()
-
+	terminate()
 
 }

@@ -16,6 +16,58 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+type Stop struct {
+	id         string
+	neighbours []string
+}
+
+var network map[string]Stop = make(map[string]Stop)
+
+
+
+// func getStop() {
+// 	// sql query
+// }
+
+func getNeighbours(db *sql.DB, id string) {
+	//		FIND ALL TRIPS ASSOCIATED WITH PROVIDED STOP ID THEN FIND STOP ID FOR SEQUENCE NO - 1 AND SEQ NO + 1
+	qry := `
+		SELECT trip.sequence AS seq, trip.id
+		FROM stop_time
+		JOIN trip ON stop_time.trip = trip.id
+		WHERE stop_time.id = ?;`
+
+
+	rows, err := db.Query(qry, id)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for rows.Next() {
+		
+	}
+
+
+
+
+}
+
+func connectNetwork() {
+	db, err := sql.Open("sqlite3", "data/data.db")
+	if err != nil {
+		log.Fatal(err)
+	}
+	var ids []string
+	for id := range network {
+		ids = append(ids, id)
+	}
+
+	for _, id := range ids {
+		getNeighbours(db, id)
+	}
+
+}
+
 func createDb(db *sql.DB, qry string) {
 
 	createTableSQL := qry
@@ -72,6 +124,10 @@ func getStops() {
 		id := line[0]
 		code := line[1]
 		name := line[2]
+
+		// add stop to graph
+		network[id] = Stop{id: id, neighbours: []string{}}
+
 		parent := "'" + line[9] + "'"
 		// is this valid?
 		if line[9] == "" {
@@ -248,6 +304,8 @@ func getStopTimes(trips map[string]bool) {
 		id TEXT NOT NULL,
 		sequence INT NOT NULL,
 		headsign TEXT
+		FOREIGN KEY (trip_id) REFERENCES trip(id)
+		FOREIGN KEY (id) REFERENCES stop(id)
 	);
 `
 
@@ -368,6 +426,11 @@ func main() {
 		log.Fatal("something fucked with getTrips ngl mate")
 	}
 	getStopTimes(tripSubset)
+
+	connectNetwork()
+	// add stops to indexed graph
+	// connect stops based on stop times
+	//
 
 	terminate()
 

@@ -16,39 +16,83 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-type Stop struct {
-	id         string
-	neighbours []string
+// type Stop struct {
+// 	id         string
+// 	neighbours []string
+// }
+
+// id to neighbours
+var network map[string][]string = make(map[string][]string)
+
+func addEdge(from string, to string) {
+	network[from] = append(network[from], to)
+	network[to] = append(network[to], from)
 }
-
-var network map[string]Stop = make(map[string]Stop)
-
-
 
 // func getStop() {
 // 	// sql query
 // }
 
+type tripRow struct {
+	sequence int
+	trip_id  string
+}
+
+type adjStop struct {
+	id string
+}
+
 func getNeighbours(db *sql.DB, id string) {
 	//		FIND ALL TRIPS ASSOCIATED WITH PROVIDED STOP ID THEN FIND STOP ID FOR SEQUENCE NO - 1 AND SEQ NO + 1
 	qry := `
-		SELECT trip.sequence AS seq, trip.id
+		SELECT stop_time.sequence AS seq, trip.id
 		FROM stop_time
-		JOIN trip ON stop_time.trip = trip.id
+		JOIN trip ON stop_time.trip_id = trip.id
 		WHERE stop_time.id = ?;`
-
 
 	rows, err := db.Query(qry, id)
 	if err != nil {
 		log.Fatal(err)
 	}
 
+	seen := make(map[string]bool)
+
 	for rows.Next() {
-		
+		var row tripRow
+		err := rows.Scan(&row.sequence, &row.trip_id)
+		if err != nil {
+			log.Fatal(err)
+		}
+		subQry := `
+			SELECT id
+			FROM stop_time
+			WHERE sequence = ? and trip_id = ?;`
+
+		res, err := db.Query(subQry, row.sequence, row.trip_id)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		for res.Next() {
+			var adj adjStop
+			err = res.Scan(&adj.id)
+			if err != nil {
+				log.Fatal(err)
+			}
+			// dont want duplicates of adj stops
+			seen[adj.id] = true
+		}
+
 	}
 
+	var adjacents []string
+	for id_ := range seen {
+		adjacents = append(adjacents, id_)
+	}
 
-
+	for _, neighbour := range adjacents {
+		addEdge(id, neighbour)
+	}
 
 }
 
@@ -126,7 +170,7 @@ func getStops() {
 		name := line[2]
 
 		// add stop to graph
-		network[id] = Stop{id: id, neighbours: []string{}}
+		network[id] = []string{}
 
 		parent := "'" + line[9] + "'"
 		// is this valid?
@@ -303,8 +347,8 @@ func getStopTimes(trips map[string]bool) {
 		departure_time TEXT NOT NULL,
 		id TEXT NOT NULL,
 		sequence INT NOT NULL,
-		headsign TEXT
-		FOREIGN KEY (trip_id) REFERENCES trip(id)
+		headsign TEXT,
+		FOREIGN KEY (trip_id) REFERENCES trip(id),
 		FOREIGN KEY (id) REFERENCES stop(id)
 	);
 `

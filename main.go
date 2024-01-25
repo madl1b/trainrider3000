@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -38,78 +39,123 @@ type tripRow struct {
 	trip_id  string
 }
 
-type adjStop struct {
-	id string
+type AdjStop struct {
+	id       string
+	sequence int
+}
+
+func terminate() {
+	err := os.RemoveAll("trainData")
+	if err != nil {
+		log.Fatal(err)
+	}
+}
+
+func handleError(err error) {
+	if err != nil {
+		terminate()
+		log.Fatal(err)
+	}
 }
 
 func getNeighbours(db *sql.DB, id string) {
-	//		FIND ALL TRIPS ASSOCIATED WITH PROVIDED STOP ID THEN FIND STOP ID FOR SEQUENCE NO - 1 AND SEQ NO + 1
-	qry := `
-		SELECT stop_time.sequence AS seq, trip.id
-		FROM stop_time
-		JOIN trip ON stop_time.trip_id = trip.id
-		WHERE stop_time.id = ?;`
+    qry := `
+        SELECT stop_time.sequence AS seq, trip.id
+        FROM stop_time
+        JOIN trip ON stop_time.trip_id = trip.id
+        WHERE stop_time.id = ?;`
 
-	rows, err := db.Query(qry, id)
-	if err != nil {
-		log.Fatal(err)
-	}
+    rows, err := db.Query(qry, id)
+    handleError(err)
+    defer rows.Close()
 
-	seen := make(map[string]bool)
+    seen := make(map[string]bool)
+    var adjacents []string
 
-	for rows.Next() {
-		var row tripRow
-		err := rows.Scan(&row.sequence, &row.trip_id)
-		if err != nil {
-			log.Fatal(err)
-		}
-		subQry := `
-			SELECT id
-			FROM stop_time
-			WHERE sequence = ? and trip_id = ?;`
+    stmt, err := db.Prepare("SELECT id, sequence FROM stop_time WHERE trip_id = ? ORDER BY sequence")
+    handleError(err)
+    defer stmt.Close()
 
-		res, err := db.Query(subQry, row.sequence, row.trip_id)
-		if err != nil {
-			log.Fatal(err)
-		}
+    var tripRows []tripRow
 
-		for res.Next() {
-			var adj adjStop
-			err = res.Scan(&adj.id)
-			if err != nil {
-				log.Fatal(err)
-			}
-			// dont want duplicates of adj stops
-			seen[adj.id] = true
-		}
+    for rows.Next() {
+        var row tripRow
+        err := rows.Scan(&row.sequence, &row.trip_id)
+        handleError(err)
+        tripRows = append(tripRows, row)
+    }
 
-	}
+    for _, row := range tripRows {
+        res, err := stmt.Query(row.trip_id)
+        handleError(err)
+        defer res.Close()
 
-	var adjacents []string
-	for id_ := range seen {
-		adjacents = append(adjacents, id_)
-	}
+        var adjStops []AdjStop
+        for res.Next() {
+            var adjStop AdjStop
+            err := res.Scan(&adjStop.id, &adjStop.sequence)
+            handleError(err)
+            adjStops = append(adjStops, adjStop)
+        }
 
-	for _, neighbour := range adjacents {
-		addEdge(id, neighbour)
-	}
+        var previous AdjStop
+        var next AdjStop
 
+        for _, adjStop := range adjStops {
+            if adjStop.sequence < row.sequence {
+                previous = adjStop
+            } else if adjStop.sequence > row.sequence {
+                next = adjStop
+                break
+            }
+        }
+
+        if !seen[previous.id] {
+            adjacents = append(adjacents, previous.id)
+        }
+
+        if !seen[next.id] {
+            adjacents = append(adjacents, next.id)
+        }
+
+        seen[previous.id] = true
+        seen[next.id] = true
+    }
+
+    for _, neighbour := range adjacents {
+        addEdge(id, neighbour)
+    }
 }
 
 func connectNetwork() {
-	db, err := sql.Open("sqlite3", "data/data.db")
-	if err != nil {
-		log.Fatal(err)
-	}
 	var ids []string
 	for id := range network {
 		ids = append(ids, id)
 	}
 
-	for _, id := range ids {
-		getNeighbours(db, id)
+	db, err := sql.Open("sqlite3", "data/data.db")
+	if err != nil {
+		log.Fatal(err)
 	}
 
+	var wg sync.WaitGroup
+	done := make(chan bool)
+
+	for _, id := range ids {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			getNeighbours(db, id)
+		}(id)
+	}
+
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	<-done
+	db.Close()
 }
 
 func createDb(db *sql.DB, qry string) {
@@ -224,6 +270,8 @@ func getCalendar() map[string]bool {
 
 	serviceMap := make(map[string]bool)
 	insertionQry := "INSERT INTO calendar (id, mon, tue, wed, thu, fri, sat, sun, start_date, end_date) VALUES "
+	curr := time.Now().Format("20060102")
+
 	// reduce repetition
 	for i, line := range lines[1:] {
 		if len(services) == insert_limit || (len(services) > 0 && i == len(services)) {
@@ -237,15 +285,16 @@ func getCalendar() map[string]bool {
 			services = []string{}
 		}
 
-		curr := time.Now().Format("20060102")
 		start := line[8]
+		end := line[9]
+		print(start + "\n")
 		id := line[0]
 		line[0], line[8], line[9] = fmt.Sprintf("'%s'", line[0]), fmt.Sprintf("'%s'", line[8]), fmt.Sprintf("'%s'", line[9])
 		// fmt.Printf("%s, %s, %d\n", curr, start, today)
 
 		dayData := line[1:8]
 		// consider including services for the next day as well
-		if dayData[today] == "1" && curr == start {
+		if dayData[today] == "1" && curr >= start && curr <= end {
 			services = append(services, "("+strings.Join(line, ",")+")")
 			serviceMap[id] = true
 		}
@@ -315,13 +364,6 @@ func getTrips(validService map[string]bool) map[string]bool {
 	}
 
 	return tripReady
-}
-
-func terminate() {
-	err := os.RemoveAll("trainData")
-	if err != nil {
-		log.Fatal(err)
-	}
 }
 
 func getStopTimes(trips map[string]bool) {
@@ -472,6 +514,7 @@ func main() {
 	getStopTimes(tripSubset)
 
 	connectNetwork()
+
 	// add stops to indexed graph
 	// connect stops based on stop times
 	//

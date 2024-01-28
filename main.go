@@ -11,23 +11,45 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// type Stop struct {
-// 	id         string
-// 	neighbours []string
-// }
+type Stop struct {
+	trips map[string]bool
+}
 
-// id to neighbours
-var network map[string][]string = make(map[string][]string)
+// id to map checking for trip id
+// only use this for fast lookup
+// trip_id = 'platform' if this is an 'exchange' stop
+var network map[string]map[string]map[string]bool = make(map[string]map[string]map[string]bool)
 
-func addEdge(from string, to string) {
-	network[from] = append(network[from], to)
-	network[to] = append(network[to], from)
+// neighbours[stop_id] = [(id1, trip_id), (id2, trip_id), (id3, trip_id)]
+var neighbours map[string][][2]string = make(map[string][][2]string)
+
+var trips_ []string
+
+func ensureNodeExists(node string, tripID string) {
+	if network[node] == nil {
+		network[node] = make(map[string]map[string]bool)
+	}
+	if network[node][tripID] == nil {
+		network[node][tripID] = make(map[string]bool)
+	}
+}
+
+func addEdge(from, to, tripID string) {
+	ensureNodeExists(from, tripID)
+	ensureNodeExists(to, tripID)
+
+	if !network[from][tripID][to] {
+		neighbours[from] = append(neighbours[from], [2]string{to, tripID})
+		neighbours[to] = append(neighbours[to], [2]string{from, tripID})
+	}
+
+	network[from][tripID][to] = true
+	network[to][tripID][from] = true
 }
 
 // func getStop() {
@@ -58,104 +80,49 @@ func handleError(err error) {
 	}
 }
 
-func getNeighbours(db *sql.DB, id string) {
-    qry := `
-        SELECT stop_time.sequence AS seq, trip.id
-        FROM stop_time
-        JOIN trip ON stop_time.trip_id = trip.id
-        WHERE stop_time.id = ?;`
-
-    rows, err := db.Query(qry, id)
-    handleError(err)
-    defer rows.Close()
-
-    seen := make(map[string]bool)
-    var adjacents []string
-
-    stmt, err := db.Prepare("SELECT id, sequence FROM stop_time WHERE trip_id = ? ORDER BY sequence")
-    handleError(err)
-    defer stmt.Close()
-
-    var tripRows []tripRow
-
-    for rows.Next() {
-        var row tripRow
-        err := rows.Scan(&row.sequence, &row.trip_id)
-        handleError(err)
-        tripRows = append(tripRows, row)
-    }
-
-    for _, row := range tripRows {
-        res, err := stmt.Query(row.trip_id)
-        handleError(err)
-        defer res.Close()
-
-        var adjStops []AdjStop
-        for res.Next() {
-            var adjStop AdjStop
-            err := res.Scan(&adjStop.id, &adjStop.sequence)
-            handleError(err)
-            adjStops = append(adjStops, adjStop)
-        }
-
-        var previous AdjStop
-        var next AdjStop
-
-        for _, adjStop := range adjStops {
-            if adjStop.sequence < row.sequence {
-                previous = adjStop
-            } else if adjStop.sequence > row.sequence {
-                next = adjStop
-                break
-            }
-        }
-
-        if !seen[previous.id] {
-            adjacents = append(adjacents, previous.id)
-        }
-
-        if !seen[next.id] {
-            adjacents = append(adjacents, next.id)
-        }
-
-        seen[previous.id] = true
-        seen[next.id] = true
-    }
-
-    for _, neighbour := range adjacents {
-        addEdge(id, neighbour)
-    }
-}
-
 func connectNetwork() {
-	var ids []string
-	for id := range network {
-		ids = append(ids, id)
+
+	db, err := sql.Open("sqlite3", "database/data.db")
+	handleError(err)
+
+	defer db.Close()
+
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_trip_id ON stop_time(trip_id);`)
+	handleError(err)
+
+	qry := `SELECT id FROM stop_time WHERE trip_id = ? ORDER BY sequence;`
+	stmt, err := db.Prepare(qry)
+	handleError(err)
+
+	for _, trip_id := range trips_ {
+		rows, err := stmt.Query(trip_id)
+		handleError(err)
+		if err == sql.ErrNoRows {
+			fmt.Println("No rows were returned!")
+			continue
+		}
+		defer rows.Close()
+
+		prev := ""
+		curr := ""
+		// Iterate through the result set
+		for rows.Next() {
+			var stopID string
+			if err := rows.Scan(&stopID); err != nil {
+				fmt.Println("Error scanning row:", err)
+				continue
+			}
+
+			curr = stopID
+			if prev != "" {
+				addEdge(prev, curr, trip_id)
+			}
+			prev = curr
+		}
+
 	}
 
-	db, err := sql.Open("sqlite3", "data/data.db")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	var wg sync.WaitGroup
-	done := make(chan bool)
-
-	for _, id := range ids {
-		wg.Add(1)
-		go func(id string) {
-			defer wg.Done()
-			getNeighbours(db, id)
-		}(id)
-	}
-
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	<-done
-	db.Close()
+	fmt.Println(neighbours)
 }
 
 func createDb(db *sql.DB, qry string) {
@@ -174,8 +141,9 @@ func getStops() {
 	if err != nil {
 		return
 	}
-	db, err := sql.Open("sqlite3", "data/data.db")
+	db, err := sql.Open("sqlite3", "database/data.db")
 	if err != nil {
+		fmt.Println("crazy")
 		log.Fatal(err)
 	}
 
@@ -199,7 +167,6 @@ func getStops() {
 	insert_limit := 1000
 	var stops []string
 
-	// reduce repetition
 	for i, line := range lines[1:] {
 		if len(stops) == insert_limit || (len(stops) > 0 && i == len(lines)) {
 			qry := strings.Join(stops, ",")
@@ -214,9 +181,14 @@ func getStops() {
 		id := line[0]
 		code := line[1]
 		name := line[2]
-
+		parent_station := line[9]
 		// add stop to graph
-		network[id] = []string{}
+		if network[id] == nil {
+			network[id] = make(map[string]map[string]bool)
+			if parent_station != "" {
+				addEdge(id, parent_station, "platform")
+			}
+		}
 
 		parent := "'" + line[9] + "'"
 		// is this valid?
@@ -235,7 +207,7 @@ func getCalendar() map[string]bool {
 		log.Fatal("couldn't open calendar.txt")
 		return nil
 	}
-	db, err := sql.Open("sqlite3", "data/data.db")
+	db, err := sql.Open("sqlite3", "database/data.db")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -287,7 +259,6 @@ func getCalendar() map[string]bool {
 
 		start := line[8]
 		end := line[9]
-		print(start + "\n")
 		id := line[0]
 		line[0], line[8], line[9] = fmt.Sprintf("'%s'", line[0]), fmt.Sprintf("'%s'", line[8]), fmt.Sprintf("'%s'", line[9])
 		// fmt.Printf("%s, %s, %d\n", curr, start, today)
@@ -310,7 +281,7 @@ func getTrips(validService map[string]bool) map[string]bool {
 		log.Fatal(err)
 		return nil
 	}
-	db, err := sql.Open("sqlite3", "data/data.db")
+	db, err := sql.Open("sqlite3", "database/data.db")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -354,6 +325,7 @@ func getTrips(validService map[string]bool) map[string]bool {
 			trips = []string{}
 		}
 		if validService[line[1]] == true {
+			trips_ = append(trips_, line[2])
 			tripReady[line[2]] = true
 			var quotes []int = []int{0, 1, 2, 3, 4, 6, 7}
 			for _, i := range quotes {
@@ -377,7 +349,7 @@ func getStopTimes(trips map[string]bool) {
 	if err != nil {
 		return
 	}
-	db, err := sql.Open("sqlite3", "data/data.db")
+	db, err := sql.Open("sqlite3", "database/data.db")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -484,16 +456,16 @@ func main() {
 		fmt.Println("uh oh! you fucked up, badly.")
 	}
 
+	err = os.MkdirAll("database", 0755)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	cmd := exec.Command("/bin/sh", "unpack.sh")
 	_, err = cmd.Output()
 	if err != nil {
 		fmt.Println("Error running timetable unpacking shell script: ", err)
 		return
-	}
-
-	err = os.MkdirAll("data", 0755)
-	if err != nil {
-		log.Fatal(err)
 	}
 
 	getStops()
@@ -515,9 +487,25 @@ func main() {
 
 	connectNetwork()
 
+	// fmt.Println(network)
 	// add stops to indexed graph
 	// connect stops based on stop times
 	//
+
+	// for {
+	// 	var from string
+	// 	var trip_id string
+	// 	var to string
+	// 	fmt.Print("<from> <trip id> <to>:")
+	// 	_, err := fmt.Scanf("%s %s %s", &from, &trip_id, &to)
+	// 	if err != nil {
+	// 		fmt.Printf("err: %s\n", err)
+	// 		continue
+	// 	}
+
+	// 	fmt.Printf("%t", network[from][trip_id][to])
+
+	// }
 
 	terminate()
 

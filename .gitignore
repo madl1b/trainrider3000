@@ -1,4 +1,4 @@
 # .gitignore
 config.go
 trainData/.*
-dat/data.db
+database/data.db
